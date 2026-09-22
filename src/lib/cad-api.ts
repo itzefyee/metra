@@ -26,7 +26,9 @@ async function errorMessage(response: Response, fallback: string): Promise<strin
 }
 
 export class CADAPI {
-  private static readonly BASE_URL = '/api/cad';
+  private static get BASE_URL(): string {
+    return `${process.env.NEXT_PUBLIC_CONVEX_SITE_URL || ''}/api/cad`;
+  }
 
   private static readHistory(): CADHistoryItem[] {
     if (typeof window === 'undefined') return [];

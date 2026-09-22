@@ -3,7 +3,6 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Convex Static Hosting serves the exported `out/` directory directly.
   output: "export",
-  reactCompiler: true,
   assetPrefix: process.env.STATIC_HOSTING_BASE_PATH || undefined,
   
   images: {
@@ -24,11 +23,11 @@ const nextConfig: NextConfig = {
   
   // Use webpack (Turbopack is disabled by not including it)
   webpack: (config, { isServer }) => {
-    // Handle WASM files with file-loader
+
+    // Handle WASM files with Webpack 5 asset modules
     config.module.rules.push({
       test: /\.wasm$/,
-      type: "javascript/auto",
-      loader: "file-loader",
+      type: "asset/resource",
     });
 
     // For Webpack 5 (Next.js), add fallback for Node.js modules (client-side only)

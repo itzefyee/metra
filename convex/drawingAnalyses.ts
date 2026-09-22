@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, internalQuery } from "./_generated/server";
+import { internalMutation, internalQuery, query } from "./_generated/server";
 
 export const create = internalMutation({
   args: {
@@ -37,6 +37,17 @@ export const getByUser = internalQuery({
     return await ctx.db
       .query("drawingAnalyses")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .order("desc")
+      .collect();
+  },
+});
+
+export const getByClientId = query({
+  args: { clientId: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("drawingAnalyses")
+      .withIndex("by_client_id", (q) => q.eq("clientId", args.clientId))
       .order("desc")
       .collect();
   },

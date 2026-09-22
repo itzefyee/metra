@@ -4,7 +4,8 @@
  * Helper functions to call MCP server from your Next.js app
  */
 
-const MCP_API_BASE = '/api/mcp';
+const MCP_API_BASE = `${process.env.NEXT_PUBLIC_CONVEX_SITE_URL || ''}/api/mcp`;
+
 
 /**
  * Chat with MCP assistant

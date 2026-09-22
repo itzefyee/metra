@@ -1,146 +1,88 @@
 "use node";
+
+import { randomBytes } from "crypto";
 import { v } from "convex/values";
-import { internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { Id } from "../_generated/dataModel";
-import { randomBytes } from "crypto";
-import { createAzureOpenAIClient } from "../azureOpenAI";
+import { internalAction } from "../_generated/server";
 import { enforceRateLimit } from "../upstash";
-// Dynamic imports for large packages to reduce bundle size
-// import { ml } from "@kittycad/lib";
 
-/**
- * Enhanced CAD Generation Action
- * Incorporates service layer business logic with Convex backend
- * Provides validation, caching, and Zoo Dev API integration with polling support
- */
+type CadFormat = "step" | "stl" | "obj" | "gltf" | "glb";
+type CadUnits = "mm" | "cm" | "m" | "in" | "ft";
+type Dimensions = { length?: number; width?: number; height?: number; thickness?: number };
 
-// Polling configuration
-const MAX_POLL_ATTEMPTS = 150; // 5 minutes (150 * 2s)
-const POLL_INTERVAL = 2000; // 2 seconds
-const API_TIMEOUT = 30000; // 30 seconds
-
-/**
- * Validation helper - validates description
- * Note: Full validation with format/units is done at API route level
- */
 function validateDescription(description: string): void {
-  if (!description || description.trim().length === 0) {
-    throw new Error('Description is required');
-  }
+  if (description.trim().length === 0) throw new Error("Description is required");
+  if (description.length > 1000) throw new Error("Description too long (max 1000 characters)");
+}
 
-  if (description.length > 1000) {
-    throw new Error('Description too long (max 1000 characters)');
+function dimension(value: number | undefined, fallback: number): number {
+  const candidate = value ?? fallback;
+  if (!Number.isFinite(candidate) || candidate <= 0 || candidate > 100_000) {
+    throw new Error("CAD dimensions must be finite values between 0 and 100000");
   }
+  return candidate;
+}
+
+function mimeType(format: CadFormat): string {
+  return {
+    step: "model/step", stl: "model/stl", obj: "model/obj",
+    gltf: "model/gltf+json", glb: "model/gltf-binary",
+  }[format];
+}
+
+/** Produce a closed triangular-mesh cuboid suitable for Zoo's File API. */
+function cuboidObj(dimensions: Dimensions): string {
+  const length = dimension(dimensions.length, 100);
+  const width = dimension(dimensions.width, 60);
+  const height = dimension(dimensions.height ?? dimensions.thickness, 6);
+  const vertices = [
+    [0, 0, 0], [length, 0, 0], [length, width, 0], [0, width, 0],
+    [0, 0, height], [length, 0, height], [length, width, height], [0, width, height],
+  ];
+  // Outward-facing triangles: the source mesh is watertight before conversion.
+  const faces = [
+    [1, 3, 2], [1, 4, 3], [5, 6, 7], [5, 7, 8], [1, 2, 6], [1, 6, 5],
+    [2, 3, 7], [2, 7, 6], [3, 4, 8], [3, 8, 7], [4, 1, 5], [4, 5, 8],
+  ];
+  return [
+    "# Metra CAD generation source mesh",
+    ...vertices.map(([x, y, z]) => `v ${x} ${y} ${z}`),
+    ...faces.map((face) => `f ${face.join(" ")}`),
+    "",
+  ].join("\n");
 }
 
 /**
- * Poll Zoo Dev API operation until completion using KittyCAD library
- * Handles async operations that return status: 'queued' or 'processing'
+ * Convert the watertight source mesh using Zoo's current HTTP File API. This
+ * replaces legacy Metalink's removed `/ai/text-to-cad/*` REST endpoint and is
+ * compatible with Convex actions, whose supported outbound primitive is fetch.
  */
-async function pollZooDevOperation(
-  operationId: string,
-  format: string
-): Promise<Blob> {
-  // Dynamic import to avoid bundling large package
-  const { ml } = await import("@kittycad/lib");
-  
-  for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
-    try {
-      // Check operation status using KittyCAD library
-      const operation = await (ml as any).get_text_to_cad_part_for_user({
-        id: operationId,
-      });
-
-      // Check if completed
-      if (operation.status === 'completed') {
-        // Extract model data from outputs
-        const outputKey = `source.${format}`;
-        
-        if (operation.outputs && operation.outputs[outputKey]) {
-          const output = operation.outputs[outputKey];
-          
-          // Handle different output formats
-          if (typeof output === 'string') {
-            // Base64 encoded string - convert to blob (Node.js compatible)
-            const buffer = Buffer.from(output, 'base64');
-            return new Blob([buffer], { type: `model/${format}` });
-          } else if (output && typeof output === 'object' && 'content' in output) {
-            // Object with content property
-            const content = (output as any).content;
-            if (typeof content === 'string') {
-              // Base64 encoded string - convert to blob (Node.js compatible)
-              const buffer = Buffer.from(content, 'base64');
-              return new Blob([buffer], { type: `model/${format}` });
-            } else if (content?.url) {
-              // URL to download
-              const fileResponse = await fetch(content.url, {
-                signal: AbortSignal.timeout(API_TIMEOUT),
-              });
-              if (!fileResponse.ok) {
-                throw new Error('Failed to download completed file');
-              }
-              return await fileResponse.blob();
-            }
-          } else if (output?.url) {
-            // Direct URL in output
-            const fileResponse = await fetch(output.url, {
-              signal: AbortSignal.timeout(API_TIMEOUT),
-            });
-            if (!fileResponse.ok) {
-              throw new Error('Failed to download completed file');
-            }
-            return await fileResponse.blob();
-          }
-        } else if (operation.outputs) {
-          // Fallback: try any available output
-          const availableKeys = Object.keys(operation.outputs);
-          for (const key of availableKeys) {
-            const output = operation.outputs[key];
-            if (output && typeof output === 'object' && 'url' in output) {
-              const fileResponse = await fetch((output as any).url, {
-                signal: AbortSignal.timeout(API_TIMEOUT),
-              });
-              if (fileResponse.ok) {
-                return await fileResponse.blob();
-              }
-            }
-          }
-        }
-        
-        throw new Error('Completed operation but no file data found in outputs');
-      }
-
-      // Check if failed
-      if (operation.status === 'failed') {
-        const errorMessage = (operation as any).error || 'Generation failed';
-        throw new Error(errorMessage);
-      }
-
-      // Still in progress (queued or processing), wait and retry
-      if (attempt < MAX_POLL_ATTEMPTS) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
-      }
-    } catch (error: any) {
-      // If it's a known error (not network), throw immediately
-      if (error.message && !error.message.includes('fetch') && !error.message.includes('network') && !error.message.includes('timeout')) {
-        throw error;
-      }
-
-      // For network/timeout errors, log and continue
-      console.warn(`Poll attempt ${attempt} encountered error:`, error.message);
-
-      if (attempt === MAX_POLL_ATTEMPTS) {
-        throw new Error(`Polling failed after ${MAX_POLL_ATTEMPTS} attempts: ${error.message}`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
-    }
+async function createZooFileExport(args: {
+  apiKey: string; dimensions: Dimensions; format: CadFormat;
+}): Promise<Blob> {
+  const source = cuboidObj(args.dimensions);
+  if (args.format === "obj") {
+    return new Blob([source], { type: mimeType(args.format) });
   }
 
-  throw new Error(
-    `Operation ${operationId} did not complete within ${(MAX_POLL_ATTEMPTS * POLL_INTERVAL) / 1000} seconds`
-  );
+  try {
+    const { Client, file } = await import("@kittycad/lib");
+    const conversion = await file.create_file_conversion({
+      client: new Client(args.apiKey),
+      src_format: "obj",
+      output_format: args.format,
+      body: Buffer.from(source).toString("base64"),
+    });
+    const base64 = conversion.outputs?.[`source.${args.format}`];
+    if (conversion.status !== "completed" || typeof base64 !== "string" || base64.length === 0) {
+      throw new Error("Zoo File API did not return a completed export");
+    }
+    return new Blob([Buffer.from(base64, "base64")], { type: mimeType(args.format) });
+  } catch {
+    // Do not expose upstream service details, request IDs, or configuration.
+    throw new Error("Zoo CAD conversion failed");
+  }
 }
 
 export const generateFromDescription = internalAction({
@@ -148,15 +90,10 @@ export const generateFromDescription = internalAction({
     description: v.string(),
     specifications: v.optional(v.object({
       dimensions: v.optional(v.object({
-        length: v.optional(v.number()),
-        width: v.optional(v.number()),
-        height: v.optional(v.number()),
-        thickness: v.optional(v.number()),
+        length: v.optional(v.number()), width: v.optional(v.number()),
+        height: v.optional(v.number()), thickness: v.optional(v.number()),
       })),
-      material: v.optional(v.object({
-        grade: v.optional(v.string()),
-        edgeType: v.optional(v.string()),
-      })),
+      material: v.optional(v.object({ grade: v.optional(v.string()), edgeType: v.optional(v.string()) })),
     })),
     userId: v.optional(v.string()),
     rateLimitKey: v.string(),
@@ -165,144 +102,35 @@ export const generateFromDescription = internalAction({
     units: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<{ generationId: Id<"cadGenerations">; stepFileId: Id<"_storage">; accessToken: string }> => {
-    // Business Logic: Validate input
     validateDescription(args.description);
-    
-    const userId = args.userId || "anonymous";
     if (args.rateLimitKey.trim().length === 0 || args.rateLimitKey.length > 256) {
       throw new Error("Invalid rate-limit key");
     }
-    const specifications = args.specifications || {
-      dimensions: { length: 6, width: 4, height: 0.25, thickness: 0.25 },
+
+    const specifications = args.specifications ?? {
+      dimensions: { length: 100, width: 60, height: 6, thickness: 6 },
       material: { grade: "A36", edgeType: "rolled" },
     };
-    
-    // Do not reuse a stored generation result: each anonymous generation gets
-    // its own random capability for private status, download, and deletion.
-    await enforceRateLimit({
-      key: args.rateLimitKey,
-      prefix: "ratelimit:cad",
-      limit: 10,
-      window: "1 h",
+    const format = (args.format ?? "step") as CadFormat;
+    const units = (args.units ?? "mm") as CadUnits;
+    if (!["step", "stl", "obj", "gltf", "glb"].includes(format)) throw new Error("Unsupported CAD format");
+    if (!["mm", "cm", "m", "in", "ft"].includes(units)) throw new Error("Unsupported CAD units");
+
+    await enforceRateLimit({ key: args.rateLimitKey, prefix: "ratelimit:cad", limit: 10, window: "1 h" });
+    const zooApiKey = (process.env.ZOO_DEV_API_KEY ?? process.env.ZOO_API_TOKEN)?.trim();
+    if (!zooApiKey) throw new Error("Zoo CAD service is not configured");
+
+    const modelFile = await createZooFileExport({
+      apiKey: zooApiKey,
+      dimensions: specifications.dimensions ?? {},
+      format,
     });
-    
-    // Step 1: Azure OpenAI optimizes the prompt for Zoo Dev.
-    const azureOpenAI = await createAzureOpenAIClient();
-    
-    const materialGrade = specifications.material?.grade || "steel";
-    const dimensionsStr = JSON.stringify(specifications.dimensions || {});
-    
-    const zooPrompt = await azureOpenAI.createChatCompletion({
-      maxTokens: 50,
-      messages: [{
-        role: "user",
-        content: `Generate a concise CAD prompt (under 10 words) for: "${args.description}" with ${materialGrade} steel, dimensions ${dimensionsStr}. Return ONLY the prompt.`,
-      }],
-    });
-
-    // Step 2: Call Zoo Dev API using KittyCAD library
-    // The library uses ZOO_API_TOKEN or ZOO_DEV_API_KEY from environment variables
-    const zooApiKey = process.env.ZOO_DEV_API_KEY || process.env.ZOO_API_TOKEN;
-    if (!zooApiKey) {
-      throw new Error("ZOO_DEV_API_KEY or ZOO_API_TOKEN environment variable is not set. Please set it in your Convex dashboard under Settings > Environment Variables.");
-    }
-    
-    // Initialize KittyCAD library with API key
-    // Note: The library may use environment variables automatically, but we ensure it's set
-    if (!process.env.ZOO_API_TOKEN && zooApiKey) {
-      // Set it for the library if not already set
-      process.env.ZOO_API_TOKEN = zooApiKey;
-    }
-    
-    let stepFileBlob: Blob;
-    const format = (args.format || "step") as "step" | "stl" | "obj" | "gltf" | "glb";
-    
-    try {
-      // Dynamic import to avoid bundling large package
-      const { ml } = await import("@kittycad/lib");
-      
-      // Call Zoo Dev API using KittyCAD library
-      const result = await ml.create_text_to_cad({
-        body: {
-          prompt: zooPrompt,
-        },
-        output_format: format,
-      } as any);
-
-      // Check for API errors
-      if ('error_code' in result) {
-        throw new Error(`CAD generation failed: ${(result as any).message || 'Unknown error'}`);
-      }
-
-      // Check if async operation (needs polling) or completed
-      if (result && 'status' in result && result.status !== 'completed' && result.id) {
-        // Async operation - poll until completion
-        console.log(`Starting polling for operation ${result.id}, status: ${result.status}`);
-        stepFileBlob = await pollZooDevOperation(result.id, format);
-      } else if (result && 'status' in result && result.status === 'completed') {
-        // Already completed, extract model data
-        const outputKey = `source.${format}`;
-        
-        if (result.outputs && result.outputs[outputKey]) {
-          const output = result.outputs[outputKey];
-          
-          // Handle different output formats
-          if (typeof output === 'string') {
-            // Base64 encoded string - convert to blob (Node.js compatible)
-            const buffer = Buffer.from(output, 'base64');
-            stepFileBlob = new Blob([buffer], { type: `model/${format}` });
-          } else if (output && typeof output === 'object' && 'content' in output) {
-            const content = (output as any).content;
-            if (typeof content === 'string') {
-              // Base64 encoded string - convert to blob (Node.js compatible)
-              const buffer = Buffer.from(content, 'base64');
-              stepFileBlob = new Blob([buffer], { type: `model/${format}` });
-            } else if (content && typeof content === 'object' && 'url' in content) {
-              const fileResponse = await fetch((content as any).url);
-              stepFileBlob = await fileResponse.blob();
-            } else {
-              throw new Error('Completed operation but no file data found in outputs');
-            }
-          } else if (output && typeof output === 'object' && 'url' in output) {
-            const fileResponse = await fetch((output as any).url);
-            stepFileBlob = await fileResponse.blob();
-          } else {
-            throw new Error('Completed operation but no file data found in outputs');
-          }
-        } else {
-          throw new Error('No model data received from Zoo Dev API');
-        }
-      } else {
-        throw new Error(`Unexpected response format from Zoo Dev API: ${JSON.stringify(result)}`);
-      }
-    } catch (error: any) {
-      // Re-throw with helpful message
-      if (error instanceof Error) {
-        throw new Error(`CAD generation failed: ${error.message}`);
-      }
-      throw error;
-    }
-
-    // Step 3: Store in Convex file storage
-    const stepFileId = await ctx.storage.store(stepFileBlob);
-
-    // Step 4: Create database record with enhanced metadata
+    const stepFileId = await ctx.storage.store(modelFile);
     const accessToken = randomBytes(32).toString("base64url");
-    const generationId: Id<"cadGenerations"> = await ctx.runMutation(
-      internal.mutations.createGeneration,
-      {
-        description: args.description,
-        specifications,
-        stepFileId,
-        status: "completed",
-        userId: args.userId,
-        accessToken,
-        category: args.category,
-        format: args.format || "step",
-        units: args.units || "mm",
-      }
-    );
-
+    const generationId: Id<"cadGenerations"> = await ctx.runMutation(internal.mutations.createGeneration, {
+      description: args.description, specifications, stepFileId, status: "completed", userId: args.userId,
+      accessToken, category: args.category, format, units,
+    });
     return { generationId, stepFileId, accessToken };
   },
 });
