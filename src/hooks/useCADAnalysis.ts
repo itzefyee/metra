@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { useAction, useMutation } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import { DrawingAnalysis } from '@/types/cad.types';
+import { getMetraClientId } from '@/lib/client-identity';
 
 export interface CADAnalysisState {
   isAnalyzing: boolean;
@@ -45,11 +46,13 @@ export const useCADAnalysis = (options: any = {}) => {
           throw new Error('Failed to upload drawing');
         }
         const { storageId } = await uploadResponse.json();
+        const clientId = getMetraClientId(userId);
         const analysis = await analyzeUploadedDrawing({
           storageId,
           fileName: file.name,
           fileType: file.type || 'application/octet-stream',
-          clientId: userId,
+          clientId,
+          rateLimitKey: clientId,
           cadModelData,
         }) as DrawingAnalysis;
 

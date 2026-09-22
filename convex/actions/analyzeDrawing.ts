@@ -3,7 +3,8 @@
 import { v } from "convex/values";
 import { action } from "../_generated/server";
 import { internal } from "../_generated/api";
-import { createAnthropicClient } from "../aiGateway";
+import { createAzureOpenAIClient } from "../azureOpenAI";
+import { enforceRateLimit } from "../upstash";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg"]);
@@ -81,7 +82,7 @@ function fallbackAnalysis(fileName: string, cadModelData: unknown, analysisId: s
     recommendedProducts: [],
     totalRecommendations: 0,
     confidence: dimensions ? 0.72 : 0.45,
-    reasoning: `Metra created a metadata-based analysis for ${fileName}. Configure AI_GATEWAY_API_KEY in Convex to enable image analysis.`,
+    reasoning: `Metra created a metadata-based analysis for ${fileName}. Configure Azure OpenAI in Convex to enable image analysis.`,
     analysisId,
     alternativeSuggestions: {
       message: "No exact catalog match was found. Consider custom fabrication or a related structural component.",
@@ -122,35 +123,24 @@ async function analyzeImage(
   }
 
   try {
-    const { client, model } = await createAnthropicClient();
+    const azureOpenAI = await createAzureOpenAIClient();
     const base64 = Buffer.from(await blob.arrayBuffer()).toString("base64");
-    const response = await client.messages.create({
-      model,
-      max_tokens: 1200,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: contentType,
-                data: base64,
-              },
-            },
-            {
-              type: "text",
-              text: `Analyze this engineering drawing. Return only JSON with extractedSpecs (dimensions, material, loadRequirements, componentType, tolerance), confidence (0-1), and reasoning. Additional browser CAD metadata: ${JSON.stringify(cadModelData ?? {})}`,
-            },
-          ],
-        },
-      ],
-    } as never);
-    const text = response.content
-      .filter((part) => part.type === "text")
-      .map((part) => (part.type === "text" ? part.text : ""))
-      .join("");
+    const text = await azureOpenAI.createChatCompletion({
+      maxTokens: 1200,
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: `data:${contentType};base64,${base64}`, detail: "high" },
+          },
+          {
+            type: "text",
+            text: `Analyze this engineering drawing. Return only JSON with extractedSpecs (dimensions, material, loadRequirements, componentType, tolerance), confidence (0-1), and reasoning. Additional browser CAD metadata: ${JSON.stringify(cadModelData ?? {})}`,
+          },
+        ],
+      }],
+    });
     return normalizeAiResponse(JSON.parse(text.replace(/```json|```/g, "").trim()), fallback);
   } catch (error) {
     console.warn("Drawing analysis fell back to metadata", error);
@@ -207,9 +197,20 @@ export const analyzeUploadedDrawing = action({
     fileName: v.string(),
     fileType: v.string(),
     clientId: v.optional(v.string()),
+    rateLimitKey: v.string(),
     cadModelData: v.optional(v.any()),
   },
   handler: async (ctx, args): Promise<Analysis> => {
+    if (args.rateLimitKey.trim().length === 0 || args.rateLimitKey.length > 256) {
+      throw new Error("Invalid rate-limit key");
+    }
+    await enforceRateLimit({
+      key: args.rateLimitKey,
+      prefix: "ratelimit:drawing-analysis",
+      limit: 20,
+      window: "1 h",
+    });
+
     const extension = readableExtension(args.fileName);
     if (!ALLOWED_EXTENSIONS.has(extension)) {
       throw new Error("Unsupported drawing type. Upload PDF, PNG, JPG, STEP, STL, OBJ, DXF, GLTF, or GLB.");
@@ -240,7 +241,7 @@ export const analyzeUploadedDrawing = action({
       recommendedProducts: analysis.recommendedProducts,
       confidence: analysis.confidence,
       reasoning: analysis.reasoning,
-      claudeResponse: analysis,
+      aiResponse: analysis,
     });
 
     return analysis;

@@ -3,7 +3,7 @@
 ## Secrets
 
 Provider credentials belong only in Convex environment settings. In particular,
-do not put `AI_GATEWAY_API_KEY`, `ZOO_DEV_API_KEY`, Redis tokens, or any
+do not put `AZURE_OPENAI_API_KEY`, `ZOO_DEV_API_KEY`, Redis tokens, or any
 provider credential in:
 
 - a `NEXT_PUBLIC_*` variable;
@@ -12,7 +12,7 @@ provider credential in:
 - client-side requests.
 
 `npx vercel ai-gateway setup --agent codex` prepares local developer tooling.
-It does not remove the need to configure `AI_GATEWAY_API_KEY` safely in Convex
+It does not remove the need to configure Azure OpenAI credentials safely in Convex
 for deployed actions.
 
 ## Public data versus private data

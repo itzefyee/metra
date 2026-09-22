@@ -12,7 +12,7 @@ export const create = internalMutation({
     recommendedProducts: v.optional(v.array(v.any())),
     confidence: v.optional(v.number()),
     reasoning: v.optional(v.string()),
-    claudeResponse: v.optional(v.any()),
+    aiResponse: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
     return await ctx.db.insert("drawingAnalyses", {
@@ -25,7 +25,7 @@ export const create = internalMutation({
       recommendedProducts: args.recommendedProducts,
       confidence: args.confidence,
       reasoning: args.reasoning,
-      claudeResponse: args.claudeResponse,
+      aiResponse: args.aiResponse,
       analyzedAt: Date.now(),
     });
   },
@@ -58,7 +58,7 @@ export const saveForClient = internalMutation({
     recommendedProducts: v.array(v.any()),
     confidence: v.number(),
     reasoning: v.string(),
-    claudeResponse: v.any(),
+    aiResponse: v.any(),
   },
   handler: async (ctx, args) =>
     await ctx.db.insert("drawingAnalyses", {
@@ -71,7 +71,7 @@ export const saveForClient = internalMutation({
       recommendedProducts: args.recommendedProducts,
       confidence: args.confidence,
       reasoning: args.reasoning,
-      claudeResponse: args.claudeResponse,
+      aiResponse: args.aiResponse,
       analyzedAt: Date.now(),
     }),
 });

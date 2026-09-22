@@ -82,7 +82,7 @@ export default defineSchema({
     recommendedProducts: v.optional(v.array(v.any())),
     confidence: v.optional(v.number()),
     reasoning: v.optional(v.string()),
-    claudeResponse: v.optional(v.any()),
+    aiResponse: v.optional(v.any()),
     analyzedAt: v.number(),
   })
     .index("by_user", ["userId"])

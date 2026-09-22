@@ -233,7 +233,7 @@ export const createDrawingAnalysis = internalMutation({
     recommendedProducts: v.optional(v.array(v.any())),
     confidence: v.optional(v.number()),
     reasoning: v.optional(v.string()),
-    claudeResponse: v.optional(v.any()),
+    aiResponse: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
     return await ctx.db.insert("drawingAnalyses", {
@@ -246,7 +246,7 @@ export const createDrawingAnalysis = internalMutation({
       recommendedProducts: args.recommendedProducts,
       confidence: args.confidence,
       reasoning: args.reasoning,
-      claudeResponse: args.claudeResponse,
+      aiResponse: args.aiResponse,
       analyzedAt: Date.now(),
     });
   },

@@ -7,10 +7,10 @@ mounted under `/api`. There is no additional static-hosting deployment.
 ## Before a release
 
 1. Log in to the intended Convex account and select the right deployment.
-2. Configure server-only secrets in that Convex deployment. At minimum, use
-   `AI_GATEWAY_API_KEY` for gateway-backed AI work and `ZOO_DEV_API_KEY` for
-   CAD generation. Add the Upstash URL and token before exposing cost-bearing
-   anonymous endpoints.
+2. Configure server-only secrets in that Convex deployment:
+   `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and
+   `AZURE_OPENAI_DEPLOYMENT_NAME` for AI work; `ZOO_DEV_API_KEY` for CAD
+   generation; and the Upstash URL/token for cost-bearing endpoints.
 3. Confirm no secret is present in `.env*`, source code, build output, or the
    staged Git diff.
 4. Run the local quality checks that apply to the change, including:
@@ -52,19 +52,13 @@ After deployment, smoke-test:
   enabled; and
 - no browser bundle contains provider credentials.
 
-## Vercel AI Gateway
+## Azure OpenAI
 
-Vercel AI Gateway remains a server-side provider integration, not a hosting
-target. Developer tooling can be configured with:
-
-```powershell
-npx vercel ai-gateway setup --agent codex
-```
-
-Store the resulting application credential only in Convex environment settings
-as `AI_GATEWAY_API_KEY`. Rotating a gateway key requires updating the Convex
-environment and validating an AI action; it does not require a separate
-static-site deploy.
+Metra calls Azure OpenAI's v1 chat-completions endpoint from Convex actions.
+Use the Azure deployment name—not a public model label—for
+`AZURE_OPENAI_DEPLOYMENT_NAME`. The deployment must support vision for drawing
+analysis. Rotate Azure credentials in the Convex environment and validate an
+AI action; no separate static-site deploy is required.
 
 ## Rollback
 

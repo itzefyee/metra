@@ -4,9 +4,9 @@ import { internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { Id } from "../_generated/dataModel";
 import { randomBytes } from "crypto";
-import { createAnthropicClient } from "../aiGateway";
+import { createAzureOpenAIClient } from "../azureOpenAI";
+import { enforceRateLimit } from "../upstash";
 // Dynamic imports for large packages to reduce bundle size
-// import Anthropic from "@anthropic-ai/sdk";
 // import { ml } from "@kittycad/lib";
 
 /**
@@ -179,58 +179,26 @@ export const generateFromDescription = internalAction({
     
     // Do not reuse a stored generation result: each anonymous generation gets
     // its own random capability for private status, download, and deletion.
-    const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-    const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    await enforceRateLimit({
+      key: args.rateLimitKey,
+      prefix: "ratelimit:cad",
+      limit: 10,
+      window: "1 h",
+    });
     
-    if (redisUrl && redisToken) {
-      try {
-        const { Redis } = await import("@upstash/redis");
-        const redis = new Redis({
-          url: redisUrl,
-          token: redisToken,
-        });
-        
-        // Rate limiting remains server-side even though result reuse is off.
-        const { Ratelimit } = await import("@upstash/ratelimit");
-        const cadGenerationLimiter = new Ratelimit({
-          redis,
-          limiter: Ratelimit.slidingWindow(10, "1 h"),
-          analytics: true,
-          prefix: "ratelimit:cad",
-        });
-
-        const { success, remaining } = await cadGenerationLimiter.limit(args.rateLimitKey);
-        if (!success) {
-          throw new Error(`Rate limit exceeded. ${remaining} generations remaining this hour. Please try again later.`);
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message.toLowerCase().includes("rate limit")) {
-          throw error;
-        }
-        console.warn("CAD rate limiting is unavailable");
-      }
-    }
-    
-    // Step 1: Claude optimizes the prompt for Zoo Dev
-    const { client: anthropic, model: aiModel } = await createAnthropicClient();
+    // Step 1: Azure OpenAI optimizes the prompt for Zoo Dev.
+    const azureOpenAI = await createAzureOpenAIClient();
     
     const materialGrade = specifications.material?.grade || "steel";
     const dimensionsStr = JSON.stringify(specifications.dimensions || {});
     
-    const optimizedPrompt = await anthropic.messages.create({
-      model: aiModel,
-      max_tokens: 50,
+    const zooPrompt = await azureOpenAI.createChatCompletion({
+      maxTokens: 50,
       messages: [{
         role: "user",
-        content: `Generate a concise CAD prompt (under 10 words) for: "${args.description}" with ${materialGrade} steel, dimensions ${dimensionsStr}. Return ONLY the prompt.`
-      }]
+        content: `Generate a concise CAD prompt (under 10 words) for: "${args.description}" with ${materialGrade} steel, dimensions ${dimensionsStr}. Return ONLY the prompt.`,
+      }],
     });
-
-    const firstContent = optimizedPrompt.content[0];
-    if (firstContent.type !== "text") {
-      throw new Error("Unexpected response type from Anthropic API");
-    }
-    const zooPrompt = firstContent.text;
 
     // Step 2: Call Zoo Dev API using KittyCAD library
     // The library uses ZOO_API_TOKEN or ZOO_DEV_API_KEY from environment variables

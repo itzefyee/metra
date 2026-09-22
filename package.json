@@ -12,7 +12,6 @@
     "deploy:static:dev": "npx @convex-dev/static-hosting upload --build --dist out"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.71.2",
     "@convex-dev/static-hosting": "^0.2.1",
     "@kittycad/lib": "^3.1.16",
     "@react-three/drei": "^10.7.7",

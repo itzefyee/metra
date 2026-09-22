@@ -1,9 +1,8 @@
 "use node";
 import { v } from "convex/values";
 import { internalAction } from "../_generated/server";
-import { createAnthropicClient } from "../aiGateway";
-// Dynamic import for large package to reduce bundle size
-// import Anthropic from "@anthropic-ai/sdk";
+import { createAzureOpenAIClient } from "../azureOpenAI";
+import { enforceRateLimit } from "../upstash";
 
 const geometryValidator = v.object({
   dimensions: v.object({
@@ -54,7 +53,7 @@ export const generateManufacturingInsights = internalAction({
     specifications: specificationsValidator,
     userId: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (_ctx, args) => {
     const userId = args.userId || "anonymous";
     
     // Create content hash for caching
@@ -70,39 +69,23 @@ export const generateManufacturingInsights = internalAction({
     // Check cache (AI analysis is expensive, cache for 24 hours)
     try {
       const { Redis } = await import("@upstash/redis");
-      const { Ratelimit } = await import("@upstash/ratelimit");
+      await enforceRateLimit({ key: userId, prefix: "ratelimit:ai", limit: 20, window: "1 h" });
       const redis = new Redis({
         url: process.env.UPSTASH_REDIS_REST_URL!,
         token: process.env.UPSTASH_REDIS_REST_TOKEN!,
       });
-
-      // Rate limiting
-      const aiAnalysisLimiter = new Ratelimit({
-        redis,
-        limiter: Ratelimit.slidingWindow(20, "1 h"),
-        analytics: true,
-        prefix: "ratelimit:ai",
-      });
-
-      const { success, remaining } = await aiAnalysisLimiter.limit(userId);
-      if (!success) {
-        throw new Error(`AI analysis rate limit exceeded. ${remaining} requests remaining this hour.`);
-      }
 
       const cached = await redis.get(`ai:${contentHash}`);
       if (cached) {
         console.log("✅ Cache HIT for AI analysis");
         return cached as string;
       }
-      console.log("❌ Cache MISS - Calling Claude API");
+      console.log("Cache miss - calling Azure OpenAI");
     } catch (error) {
-      if (error instanceof Error && error.message.toLowerCase().includes("rate limit")) {
-        throw error;
-      }
-      console.log("Redis not available, proceeding without cache/rate limiting");
+      throw error;
     }
     
-    const { client: anthropic, model: aiModel } = await createAnthropicClient();
+    const azureOpenAI = await createAzureOpenAIClient();
 
     const prompt = `You are a steel manufacturing expert. Analyze this component:
 
@@ -127,18 +110,10 @@ Provide:
 
 Format as markdown with clear sections.`;
 
-    const response = await anthropic.messages.create({
-      model: aiModel,
-      max_tokens: 4096,
+    const analysis = await azureOpenAI.createChatCompletion({
+      maxTokens: 4096,
       messages: [{ role: "user", content: prompt }],
     });
-
-    const firstContent = response.content[0];
-    if (firstContent.type !== "text") {
-      throw new Error("Unexpected response type from Anthropic API");
-    }
-    
-    const analysis = firstContent.text;
 
     // Cache for 24 hours and track usage (if Redis is available)
     try {
@@ -151,7 +126,7 @@ Format as markdown with clear sections.`;
       await redis.setex(`ai:${contentHash}`, 86400, analysis);
       
       // Track usage
-      const key = `usage:${userId}:claude_analysis:${new Date().toISOString().split('T')[0]}`;
+      const key = `usage:${userId}:azure_openai_analysis:${new Date().toISOString().split('T')[0]}`;
       await redis.incr(key);
       await redis.expire(key, 86400 * 30);
     } catch (error) {

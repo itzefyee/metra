@@ -12,11 +12,11 @@ Browser
   -> Convex Static Hosting (`https://<deployment>.convex.site`)
        -> /api/* Convex HTTP actions
             -> Convex database and file storage
-            -> Vercel AI Gateway / Zoo Dev (server-side only)
+            -> Azure OpenAI / Zoo Dev / Upstash Redis (server-side only)
 ```
 
-The static site is delivered by Convex. Vercel AI Gateway is used only by
-server-side Convex actions.
+The static site is delivered by Convex. Azure OpenAI and Upstash are used only
+by server-side Convex actions.
 
 ## Local development
 
@@ -46,21 +46,14 @@ in frontend code or a separate hosting environment:
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
-| `AI_GATEWAY_API_KEY` | Vercel AI Gateway credential | Gateway-backed AI actions |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint | Azure-backed AI actions |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI credential | Azure-backed AI actions |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | Azure model deployment name | Chat and vision actions |
 | `ZOO_DEV_API_KEY` | Zoo Dev CAD generation credential | CAD generation |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Upstash rate limiting and optional caching | Public, cost-bearing endpoints |
-| `ANTHROPIC_API_KEY` | Temporary direct-provider migration fallback | Existing non-gateway deployments only |
-
-To configure Codex locally for Vercel AI Gateway, run:
-
-```powershell
-npx vercel ai-gateway setup --agent codex
-```
-
-That command configures the development tool; it does not publish the gateway
-credential to Convex. Add the deployment secret through the Convex dashboard
-or the authenticated Convex CLI, and never paste a real credential into a
-tracked file, issue, or terminal transcript.
+Use a chat-completions-compatible deployment that supports image input if
+drawing analysis is enabled. Configure all provider secrets through the
+authenticated Convex CLI or dashboard, never in tracked files or browser code.
 
 See [deployment operations](docs/DEPLOYMENT.md) and
 [security guidance](docs/SECURITY.md) for the release checklist.
@@ -141,4 +134,4 @@ replacement for cookie-based, managed authentication.
 
 - [Convex documentation](https://docs.convex.dev/)
 - [Convex Static Hosting](https://www.npmjs.com/package/@convex-dev/static-hosting)
-- [Vercel AI Gateway documentation](https://vercel.com/docs/ai-gateway)
+- [Azure OpenAI chat-completions documentation](https://learn.microsoft.com/en-us/azure/foundry/openai/latest)

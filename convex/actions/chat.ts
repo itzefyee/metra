@@ -3,7 +3,8 @@
 import { v } from "convex/values";
 import { internalAction } from "../_generated/server";
 import { MCP_STANDARDS } from "../mcp/config";
-import { createAnthropicClient } from "../aiGateway";
+import { createAzureOpenAIClient } from "../azureOpenAI";
+import { enforceRateLimit } from "../upstash";
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_RATE_LIMIT_KEY_LENGTH = 256;
@@ -32,32 +33,14 @@ export const sendMessage = internalAction({
       throw new Error("Invalid rate-limit key");
     }
 
-    const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-    const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (redisUrl && redisToken) {
-      try {
-        const { Redis } = await import("@upstash/redis");
-        const { Ratelimit } = await import("@upstash/ratelimit");
-        const redis = new Redis({ url: redisUrl, token: redisToken });
-        const limiter = new Ratelimit({
-          redis,
-          limiter: Ratelimit.slidingWindow(50, "1 h"),
-          analytics: true,
-          prefix: "ratelimit:chat",
-        });
-        const { success } = await limiter.limit(args.rateLimitKey);
-        if (!success) {
-          throw new Error("Rate limit exceeded");
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message === "Rate limit exceeded") {
-          throw error;
-        }
-        console.warn("Chat rate limiting is unavailable", error);
-      }
-    }
+    await enforceRateLimit({
+      key: args.rateLimitKey,
+      prefix: "ratelimit:chat",
+      limit: 50,
+      window: "1 h",
+    });
 
-    const { client: anthropic, model } = await createAnthropicClient();
+    const azureOpenAI = await createAzureOpenAIClient();
     const system = `You are Metra Assistant, an expert assistant for the Metra CAD Generator.
 
 You have access to these steel manufacturing standards:
@@ -67,15 +50,14 @@ Help users generate CAD drawings, explain applicable manufacturing standards,
 troubleshoot problems, and suggest design improvements. Be concise, helpful,
 and technically accurate.`;
 
-    const response = await anthropic.messages.create({
-      model,
-      max_tokens: 2048,
-      system,
-      messages: [{ role: "user", content: args.message.trim() }],
-    });
-    const firstContent = response.content[0];
     return {
-      message: firstContent.type === "text" ? firstContent.text : "",
+      message: await azureOpenAI.createChatCompletion({
+        maxTokens: 2048,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: args.message.trim() },
+        ],
+      }),
     };
   },
 });
