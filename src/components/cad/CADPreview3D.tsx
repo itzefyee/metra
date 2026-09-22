@@ -44,6 +44,7 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
   const [showModelInfo, setShowModelInfo] = useState(false);
   
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -55,8 +56,6 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
   // Parse file function
   const parseFile = async (file: File) => {
     setIsLoading(true);
-    setLoadingProgress(0);
-    setLoadingStage('Initializing...');
     setLoadingProgress(15);
     setLoadingStage('Reading file data...');
     setError('');
@@ -75,37 +74,20 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
       if (onParsingStart) onParsingStart();
       if (onPreviewLoaded) onPreviewLoaded(false);
       
-      // Simulate progress stages for better UX
-      setLoadingProgress(10);
-      setLoadingStage('Loading file...');
-      
       const parser = getCADParser();
       setLoadingStage('Extracting 3D geometry...');
-      
       setLoadingProgress(30);
-      setLoadingStage('Parsing CAD data...');
       
       const data = await parser.parseFile(file);
       clearInterval(progressTimer);
 
-      setLoadingProgress(85);
+      setLoadingProgress(80);
       setLoadingStage('Building 3D scene...');
-      
-      setLoadingProgress(70);
-      setLoadingStage('Building geometry...');
-      // Brief pause to allow WebGL buffer allocation
-      await new Promise(resolve => setTimeout(resolve, 60));
-      
-      // Small delay to show progress
-      await new Promise(resolve => setTimeout(resolve, 200));
-      setLoadingProgress(100);
-      setLoadingStage('Complete');
-      
-      setLoadingProgress(90);
-      setLoadingStage('Finalizing...');
+      await new Promise(resolve => setTimeout(resolve, 80));
       
       setModelData(data);
       setLoadingProgress(100);
+      setLoadingStage('Complete');
       setIsLoading(false);
       
       if (onParsingComplete) onParsingComplete(true);
@@ -134,11 +116,16 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
 
   // Initialize Three.js scene
   useEffect(() => {
-    if (!containerRef.current || !modelData || isLoading) return;
+    const container = canvasContainerRef.current || containerRef.current;
+    if (!container || !modelData || isLoading) return;
 
-    const container = containerRef.current;
-    const width = container.clientWidth;
-    const height = container.clientHeight;
+    // Clear any previous canvas elements to prevent duplicate side-by-side viewports
+    while (container.firstChild) {
+      container.removeChild(container.firstChild);
+    }
+
+    const width = container.clientWidth || 800;
+    const height = container.clientHeight || 450;
 
     // Scene
     const scene = new THREE.Scene();
@@ -149,111 +136,99 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
     cameraRef.current = camera;
 
-    // Calculate bounding box center and size
-    const bbox = modelData.boundingBox;
-    const center = new THREE.Vector3(
-      (bbox.min.x + bbox.max.x) / 2,
-      (bbox.min.y + bbox.max.y) / 2,
-      (bbox.min.z + bbox.max.z) / 2
-    );
-    const size = Math.max(
-      bbox.max.x - bbox.min.x,
-      bbox.max.y - bbox.min.y,
-      bbox.max.z - bbox.min.z
-    );
-
-    // Position camera
-    const distance = size * 2;
-    camera.position.set(center.x + distance, center.y + distance, center.z + distance);
-    camera.lookAt(center);
-
-    // Renderer with performance optimizations
-    const renderer = new THREE.WebGLRenderer({ 
-      antialias: true,
-      alpha: false, // Disable alpha for better performance
-      powerPreference: 'high-performance' // Request high-performance GPU
-    });
-    renderer.setSize(width, height);
-    // Limit pixel ratio to 2 for performance on high-DPI displays
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    container.appendChild(renderer.domElement);
-    rendererRef.current = renderer;
-
-    // Controls - Enhanced interactive controls
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.copy(center);
-    
-    // Enable smooth damping for better UX
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    
-    // Orbit controls (rotate around model) - left mouse button
-    controls.enableRotate = true;
-    controls.rotateSpeed = 1.0;
-    
-    // Zoom controls (mouse wheel/pinch)
-    controls.enableZoom = true;
-    controls.zoomSpeed = 1.2;
-    controls.minDistance = size * 0.5;
-    controls.maxDistance = size * 10;
-    
-    // Pan controls (right-click drag/two-finger drag)
-    controls.enablePan = true;
-    controls.panSpeed = 1.0;
-    controls.screenSpacePanning = true; // Pan in screen space for better UX
-    
-    controls.update();
-    controlsRef.current = controls;
-
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambientLight);
-
-    const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight1.position.set(1, 1, 1);
-    scene.add(directionalLight1);
-
-    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
-    directionalLight2.position.set(-1, -1, -1);
-    scene.add(directionalLight2);
-
-    // Grid
-    const gridHelper = new THREE.GridHelper(size * 2, 20, 0xcccccc, 0xe0e0e0);
-    gridHelper.position.set(center.x, bbox.min.y, center.z);
-    scene.add(gridHelper);
-
-    // Axes
-    const axesHelper = new THREE.AxesHelper(size / 2);
-    axesHelper.position.copy(center);
-    scene.add(axesHelper);
-
-    // Create geometry from model data with optimization
+    // Create geometry from model data
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(modelData.vertices, 3));
     
-    // Calculate normals if needed
-    if (modelData.normals.length === modelData.vertices.length) {
+    // Calculate normals
+    if (modelData.normals && modelData.normals.length === modelData.vertices.length) {
       geometry.setAttribute('normal', new THREE.BufferAttribute(modelData.normals, 3));
     } else {
       geometry.computeVertexNormals();
     }
     
-    if (modelData.indices.length > 0) {
+    if (modelData.indices && modelData.indices.length > 0) {
       geometry.setIndex(new THREE.BufferAttribute(modelData.indices, 1));
     }
-    
-    // Optimize geometry for rendering performance
-    geometry.computeBoundingSphere();
-    geometry.computeBoundingBox();
 
-    // Material with improved settings
-    const material = new THREE.MeshPhongMaterial({
+    // CRITICAL: Center geometry at origin (0, 0, 0) so model is always dead-center
+    geometry.center();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+
+    const bbox = geometry.boundingBox || new THREE.Box3();
+    const dx = bbox.max.x - bbox.min.x;
+    const dy = bbox.max.y - bbox.min.y;
+    const dz = bbox.max.z - bbox.min.z;
+    const maxDim = Math.max(dx, dy, dz, 1);
+
+    // Camera positioning framed neatly on the centered model
+    const distance = maxDim * 2.2;
+    camera.position.set(distance * 0.9, distance * 0.7, distance * 1.1);
+    camera.lookAt(0, 0, 0);
+
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true,
+      alpha: false,
+      powerPreference: 'high-performance',
+    });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    // Controls
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.enableRotate = true;
+    controls.rotateSpeed = 1.0;
+    controls.enableZoom = true;
+    controls.zoomSpeed = 1.2;
+    controls.minDistance = maxDim * 0.2;
+    controls.maxDistance = maxDim * 20;
+    controls.enablePan = true;
+    controls.panSpeed = 1.0;
+    controls.screenSpacePanning = true;
+    controls.update();
+    controlsRef.current = controls;
+
+    // Lighting for crisp industrial CAD appearance
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+    scene.add(ambientLight);
+
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x475569, 0.45);
+    hemiLight.position.set(0, 100, 0);
+    scene.add(hemiLight);
+
+    const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.85);
+    dirLight1.position.set(maxDim * 2, maxDim * 3, maxDim * 2);
+    scene.add(dirLight1);
+
+    const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+    dirLight2.position.set(-maxDim * 2, -maxDim * 2, -maxDim * 2);
+    scene.add(dirLight2);
+
+    // Ground Grid placed right beneath the model's bottom face
+    const gridSize = Math.max(maxDim * 3, 20);
+    const gridHelper = new THREE.GridHelper(gridSize, 20, 0x94a3b8, 0xe2e8f0);
+    gridHelper.position.set(0, bbox.min.y, 0);
+    scene.add(gridHelper);
+
+    // Axes helper at bottom-center of the object
+    const axesHelper = new THREE.AxesHelper(maxDim * 0.4);
+    axesHelper.position.set(0, bbox.min.y, 0);
+    scene.add(axesHelper);
+
+    // Material with metallic sheen
+    const material = new THREE.MeshStandardMaterial({
       color: parseInt(modelColor.replace('#', '0x')),
-      specular: 0x444444,
-      shininess: 30,
+      roughness: 0.35,
+      metalness: 0.2,
       side: THREE.DoubleSide,
       flatShading: false,
-      vertexColors: false, // Use material color instead of vertex colors
     });
 
     // Mesh
@@ -271,69 +246,57 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
     mesh.add(wireframe);
     wireframeRef.current = wireframe;
 
-    // Optimized animation loop - only render when controls change
-    let needsRender = true;
+    // Animation loop
+    let isRunning = true;
     const animate = () => {
+      if (!isRunning) return;
       animationFrameRef.current = requestAnimationFrame(animate);
-      
-      // Only render if controls have changed (damping is enabled)
-      if (controls.update() || needsRender) {
-        renderer.render(scene, camera);
-        needsRender = false;
-      }
+      controls.update();
+      renderer.render(scene, camera);
     };
     animate();
-    
-    // Force render on control changes
-    const handleControlChange = () => {
-      needsRender = true;
-    };
-    controls.addEventListener('change', handleControlChange);
 
-    // Handle resize
+    // Auto-resize with ResizeObserver
     const handleResize = () => {
-      if (!containerRef.current) return;
-      const newWidth = containerRef.current.clientWidth;
-      const newHeight = containerRef.current.clientHeight;
+      if (!container) return;
+      const newWidth = container.clientWidth || 800;
+      const newHeight = container.clientHeight || 450;
+      if (newWidth === 0 || newHeight === 0) return;
       camera.aspect = newWidth / newHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(newWidth, newHeight);
     };
     window.addEventListener('resize', handleResize);
 
-    // Cleanup - Proper resource disposal
+    const resizeObserver = new ResizeObserver(() => {
+      handleResize();
+    });
+    resizeObserver.observe(container);
+
+    // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
-      controls.removeEventListener('change', handleControlChange);
+      isRunning = false;
+      resizeObserver.disconnect();
       
-      // Cancel animation frame
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
       
-      // Remove renderer from DOM
-      if (rendererRef.current && containerRef.current && containerRef.current.contains(rendererRef.current.domElement)) {
-        containerRef.current.removeChild(rendererRef.current.domElement);
+      if (renderer.domElement && container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
       }
       
-      // Dispose of geometries
       geometry.dispose();
       wireframeGeometry.dispose();
-      
-      // Dispose of materials
       material.dispose();
       wireframeMaterial.dispose();
-      
-      // Dispose of renderer and controls
       renderer.dispose();
       controls.dispose();
       
-      // Clear scene
-      while(scene.children.length > 0) { 
+      while (scene.children.length > 0) { 
         const object = scene.children[0];
         scene.remove(object);
-        
-        // Dispose of any geometries and materials in the scene
         if (object instanceof THREE.Mesh) {
           if (object.geometry) object.geometry.dispose();
           if (object.material) {
@@ -346,17 +309,21 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
         }
       }
     };
-  }, [modelData, isLoading, modelColor, wireframeColor]);
+  }, [modelData, isLoading]);
 
   // Update colors dynamically without reloading scene
   useEffect(() => {
     if (!meshRef.current || !wireframeRef.current) return;
 
-    const material = meshRef.current.material as THREE.MeshPhongMaterial;
+    const material = meshRef.current.material as THREE.MeshStandardMaterial;
     const wireframeMaterial = wireframeRef.current.material as THREE.LineBasicMaterial;
 
-    material.color.set(parseInt(modelColor.replace('#', '0x')));
-    wireframeMaterial.color.set(parseInt(wireframeColor.replace('#', '0x')));
+    if (material && material.color) {
+      material.color.set(parseInt(modelColor.replace('#', '0x')));
+    }
+    if (wireframeMaterial && wireframeMaterial.color) {
+      wireframeMaterial.color.set(parseInt(wireframeColor.replace('#', '0x')));
+    }
   }, [modelColor, wireframeColor]);
 
   // Handle fullscreen
@@ -390,31 +357,29 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
 
   // Reset view
   const handleResetView = () => {
-    if (!cameraRef.current || !controlsRef.current || !modelData) return;
-
-    const bbox = modelData.boundingBox;
-    const center = new THREE.Vector3(
-      (bbox.min.x + bbox.max.x) / 2,
-      (bbox.min.y + bbox.max.y) / 2,
-      (bbox.min.z + bbox.max.z) / 2
-    );
-    const size = Math.max(
+    if (!cameraRef.current || !controlsRef.current || !meshRef.current) return;
+    const geometry = meshRef.current.geometry;
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox || new THREE.Box3();
+    const maxDim = Math.max(
       bbox.max.x - bbox.min.x,
       bbox.max.y - bbox.min.y,
-      bbox.max.z - bbox.min.z
+      bbox.max.z - bbox.min.z,
+      1
     );
 
-    const distance = size * 2;
-    cameraRef.current.position.set(center.x + distance, center.y + distance, center.z + distance);
-    controlsRef.current.target.copy(center);
+    const distance = maxDim * 2.2;
+    cameraRef.current.position.set(distance * 0.9, distance * 0.7, distance * 1.1);
+    cameraRef.current.lookAt(0, 0, 0);
+    controlsRef.current.target.set(0, 0, 0);
     controlsRef.current.update();
   };
 
   // Toggle wireframe
   const handleToggleWireframe = () => {
-    if (!meshRef.current) return;
-    const material = meshRef.current.material as THREE.MeshPhongMaterial;
-    material.wireframe = !material.wireframe;
+    if (wireframeRef.current) {
+      wireframeRef.current.visible = !wireframeRef.current.visible;
+    }
   };
 
   // Color presets
@@ -568,6 +533,9 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
           : 'h-[350px] md:h-[450px]'
       } ${className}`}
     >
+      {/* 3D Canvas Mount Point */}
+      <div ref={canvasContainerRef} className="absolute inset-0 w-full h-full" />
+
       {/* Controls overlay */}
       <div className="absolute top-4 right-4 flex flex-col space-y-2 z-10">
         <div className="bg-white/95 rounded-lg p-2 shadow-lg">

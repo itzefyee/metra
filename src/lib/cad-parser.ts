@@ -205,12 +205,7 @@ export class CADParser {
     }
     this.initPromise = (async () => {
       try {
-        // Dynamically import OpenCascade.js - only works client-side
         const ocModule = await import('opencascade.js');
-        const init = ocModule.initOpenCascade || (ocModule as any).default?.initOpenCascade || (ocModule as any).default;
-        if (typeof init !== 'function') {
-          throw new Error(`OpenCascade init function not found. Module keys: ${Object.keys(ocModule).join(', ')}`);
-        }
 
         // Check if ocMainJS is available for direct initialization with allowUndefined: true
         const MainJS = ocModule.ocMainJS;
@@ -219,13 +214,10 @@ export class CADParser {
         const libs = [
           ocModule.ocCore,
           ocModule.ocModelingAlgorithms,
-          ocModule.ocVisualApplication,
           ocModule.ocDataExchangeBase,
           ocModule.ocDataExchangeExtra,
         ].filter(Boolean);
 
-        this.oc = await init(libs.length > 0 ? { libs } : undefined);
-        this.initialized = true;
         if (typeof MainJS === 'function') {
           const oc = await new Promise<any>((resolve, reject) => {
             const timeout = setTimeout(() => {
@@ -270,10 +262,10 @@ export class CADParser {
         }
 
         // Fallback to initOpenCascade with timeout
-        const init = ocModule.initOpenCascade || (ocModule as any).default?.initOpenCascade || (ocModule as any).default;
-        if (typeof init === 'function') {
+        const initFn = ocModule.initOpenCascade || (ocModule as any).default?.initOpenCascade || (ocModule as any).default;
+        if (typeof initFn === 'function') {
           this.oc = await Promise.race([
-            init(libs.length > 0 ? { libs } : undefined),
+            initFn(libs.length > 0 ? { libs } : undefined),
             new Promise((_, reject) => setTimeout(() => reject(new Error('OpenCascade init timed out')), 10000)),
           ]);
           this.initialized = true;
@@ -283,8 +275,6 @@ export class CADParser {
         throw new Error('No OpenCascade initializer found');
       } catch (error) {
         this.initPromise = null;
-        console.error('Failed to initialize OpenCascade.js:', error);
-        throw new Error('Failed to initialize CAD parser');
         console.warn('OpenCascade.js initialization warning (using direct geometry parser fallback):', error);
       }
     })();
@@ -293,7 +283,6 @@ export class CADParser {
   }
 
   async parseSTEP(fileContent: ArrayBuffer): Promise<CADModelData> {
-    if (!this.oc) throw new Error('OpenCascade not initialized');
     if (this.oc) {
       try {
         return await this.parseSTEPWithOpenCascade(fileContent);
@@ -959,7 +948,6 @@ export class CADParser {
   }
 
   async parseFile(file: File): Promise<CADModelData> {
-    await this.initialize();
     // Give OpenCascade up to 3s to initialize in background without blocking indefinitely
     try {
       await Promise.race([
@@ -982,12 +970,7 @@ export class CADParser {
     const detectedFormat = this.detectFileFormat(arrayBuffer, declaredExtension);
     
     let modelData: CADModelData;
-    
-    // Log first few bytes for debugging
-    const preview = new Uint8Array(arrayBuffer.slice(0, 100));
-    const previewText = new TextDecoder('utf-8', { fatal: false }).decode(preview);
 
-    // Only support STEP files
     // Support STEP files
     if (detectedFormat === 'step' || detectedFormat === 'stp') {
       modelData = await this.parseSTEP(arrayBuffer);
