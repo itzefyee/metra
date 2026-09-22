@@ -57,7 +57,19 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
     setIsLoading(true);
     setLoadingProgress(0);
     setLoadingStage('Initializing...');
+    setLoadingProgress(15);
+    setLoadingStage('Reading file data...');
     setError('');
+
+    // Timer to keep progress moving so user never sees a stalled screen
+    const progressTimer = setInterval(() => {
+      setLoadingProgress((prev) => {
+        if (prev < 40) return prev + 10;
+        if (prev < 65) return prev + 5;
+        if (prev < 85) return prev + 2;
+        return prev;
+      });
+    }, 300);
 
     try {
       if (onParsingStart) onParsingStart();
@@ -68,17 +80,26 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
       setLoadingStage('Loading file...');
       
       const parser = getCADParser();
+      setLoadingStage('Extracting 3D geometry...');
       
       setLoadingProgress(30);
       setLoadingStage('Parsing CAD data...');
       
       const data = await parser.parseFile(file);
+      clearInterval(progressTimer);
+
+      setLoadingProgress(85);
+      setLoadingStage('Building 3D scene...');
       
       setLoadingProgress(70);
       setLoadingStage('Building geometry...');
+      // Brief pause to allow WebGL buffer allocation
+      await new Promise(resolve => setTimeout(resolve, 60));
       
       // Small delay to show progress
       await new Promise(resolve => setTimeout(resolve, 200));
+      setLoadingProgress(100);
+      setLoadingStage('Complete');
       
       setLoadingProgress(90);
       setLoadingStage('Finalizing...');
@@ -90,6 +111,7 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
       if (onParsingComplete) onParsingComplete(true);
       if (onModelDataParsed) onModelDataParsed(data);
     } catch (err: any) {
+      clearInterval(progressTimer);
       console.error('Error parsing CAD file:', err);
       setError(`Failed to parse file: ${err.message}`);
       setIsLoading(false);

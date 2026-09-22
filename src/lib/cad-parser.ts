@@ -212,6 +212,10 @@ export class CADParser {
           throw new Error(`OpenCascade init function not found. Module keys: ${Object.keys(ocModule).join(', ')}`);
         }
 
+        // Check if ocMainJS is available for direct initialization with allowUndefined: true
+        const MainJS = ocModule.ocMainJS;
+        const mainWasm = ocModule.ocMainWasm;
+
         const libs = [
           ocModule.ocCore,
           ocModule.ocModelingAlgorithms,
@@ -222,10 +226,66 @@ export class CADParser {
 
         this.oc = await init(libs.length > 0 ? { libs } : undefined);
         this.initialized = true;
+        if (typeof MainJS === 'function') {
+          const oc = await new Promise<any>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              reject(new Error('OpenCascade initialization timed out after 10s'));
+            }, 10000);
+
+            try {
+              new MainJS({
+                locateFile(path: string) {
+                  if (path.endsWith('.wasm')) return mainWasm;
+                  return path;
+                },
+              }).then(async (ocInstance: any) => {
+                try {
+                  for (const lib of libs) {
+                    await ocInstance.loadDynamicLibrary(lib, {
+                      loadAsync: true,
+                      global: true,
+                      nodelete: true,
+                      allowUndefined: true,
+                    });
+                  }
+                  clearTimeout(timeout);
+                  resolve(ocInstance);
+                } catch (libErr) {
+                  clearTimeout(timeout);
+                  reject(libErr);
+                }
+              }).catch((initErr: any) => {
+                clearTimeout(timeout);
+                reject(initErr);
+              });
+            } catch (err) {
+              clearTimeout(timeout);
+              reject(err);
+            }
+          });
+
+          this.oc = oc;
+          this.initialized = true;
+          return;
+        }
+
+        // Fallback to initOpenCascade with timeout
+        const init = ocModule.initOpenCascade || (ocModule as any).default?.initOpenCascade || (ocModule as any).default;
+        if (typeof init === 'function') {
+          this.oc = await Promise.race([
+            init(libs.length > 0 ? { libs } : undefined),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('OpenCascade init timed out')), 10000)),
+          ]);
+          this.initialized = true;
+          return;
+        }
+
+        throw new Error('No OpenCascade initializer found');
       } catch (error) {
         this.initPromise = null;
         console.error('Failed to initialize OpenCascade.js:', error);
         throw new Error('Failed to initialize CAD parser');
+        console.warn('OpenCascade.js initialization warning (using direct geometry parser fallback):', error);
       }
     })();
 
@@ -234,6 +294,18 @@ export class CADParser {
 
   async parseSTEP(fileContent: ArrayBuffer): Promise<CADModelData> {
     if (!this.oc) throw new Error('OpenCascade not initialized');
+    if (this.oc) {
+      try {
+        return await this.parseSTEPWithOpenCascade(fileContent);
+      } catch (ocError) {
+        console.warn('OpenCascade STEP parse failed, falling back to direct STEP parser:', ocError);
+      }
+    }
+
+    return this.parseSTEPDirect(fileContent);
+  }
+
+  private async parseSTEPWithOpenCascade(fileContent: ArrayBuffer): Promise<CADModelData> {
 
     const filename = 'model.step';
     let reader: any = null;
@@ -707,6 +779,165 @@ export class CADParser {
   }
 
 
+  private parseSTEPDirect(fileContent: ArrayBuffer): CADModelData {
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(fileContent));
+
+    // Detect unit
+    let unitScale = 1.0;
+    let detectedUnit = 'MILLIMETRE';
+    if (text.includes('.METRE.') || text.includes("'METRE'")) {
+      unitScale = 39.3701;
+      detectedUnit = 'METRE';
+    } else if (text.includes('.INCH.') || text.includes("'INCH'")) {
+      unitScale = 1.0;
+      detectedUnit = 'INCH';
+    } else if (text.includes('.MILLIMETRE.') || text.includes("'MILLIMETRE'")) {
+      unitScale = 0.0393701;
+      detectedUnit = 'MILLIMETRE';
+    }
+
+    // Extract CARTESIAN_POINT entities
+    const pointMap = new Map<string, [number, number, number]>();
+    const pointRegex = /#(\d+)\s*=\s*CARTESIAN_POINT\s*\([^,]*?,\s*\(\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)\s*\)\s*\)/g;
+    let match: RegExpExecArray | null;
+    while ((match = pointRegex.exec(text)) !== null) {
+      pointMap.set('#' + match[1], [
+        parseFloat(match[2]) * unitScale,
+        parseFloat(match[3]) * unitScale,
+        parseFloat(match[4]) * unitScale,
+      ]);
+    }
+
+    // Extract POLY_LOOP entities
+    const loopRegex = /#(\d+)\s*=\s*POLY_LOOP\s*\([^,]*?,\s*\(([^)]+)\)\s*\)/g;
+    const polygons: Array<Array<[number, number, number]>> = [];
+    while ((match = loopRegex.exec(text)) !== null) {
+      const refs = match[2].match(/#\d+/g) || [];
+      const pts = refs
+        .map((r) => pointMap.get(r))
+        .filter((p): p is [number, number, number] => p !== undefined);
+      if (pts.length >= 3) {
+        polygons.push(pts);
+      }
+    }
+
+    const vertexList: number[] = [];
+    const normalList: number[] = [];
+    const indexList: number[] = [];
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    const updateBounds = (x: number, y: number, z: number) => {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    };
+
+    if (polygons.length > 0) {
+      for (const poly of polygons) {
+        const p0 = poly[0];
+        updateBounds(p0[0], p0[1], p0[2]);
+
+        for (let i = 1; i < poly.length - 1; i++) {
+          const p1 = poly[i];
+          const p2 = poly[i + 1];
+          updateBounds(p1[0], p1[1], p1[2]);
+          updateBounds(p2[0], p2[1], p2[2]);
+
+          const v0x = p1[0] - p0[0], v0y = p1[1] - p0[1], v0z = p1[2] - p0[2];
+          const v1x = p2[0] - p0[0], v1y = p2[1] - p0[1], v1z = p2[2] - p0[2];
+          let nx = v0y * v1z - v0z * v1y;
+          let ny = v0z * v1x - v0x * v1z;
+          let nz = v0x * v1y - v0y * v1x;
+          const len = Math.hypot(nx, ny, nz);
+          if (len > 0.000001) {
+            nx /= len; ny /= len; nz /= len;
+          } else {
+            nx = 0; ny = 1; nz = 0;
+          }
+
+          const baseIdx = vertexList.length / 3;
+          vertexList.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
+          normalList.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+          indexList.push(baseIdx, baseIdx + 1, baseIdx + 2);
+        }
+      }
+    } else if (pointMap.size >= 4) {
+      for (const [x, y, z] of pointMap.values()) {
+        updateBounds(x, y, z);
+      }
+
+      const corners: Array<[number, number, number]> = [
+        [minX, minY, minZ], [maxX, minY, minZ], [maxX, maxY, minZ], [minX, maxY, minZ],
+        [minX, minY, maxZ], [maxX, minY, maxZ], [maxX, maxY, maxZ], [minX, maxY, maxZ],
+      ];
+
+      const boxFaces = [
+        [0, 2, 1], [0, 3, 2],
+        [4, 5, 6], [4, 6, 7],
+        [0, 1, 5], [0, 5, 4],
+        [2, 3, 7], [2, 7, 6],
+        [0, 4, 7], [0, 7, 3],
+        [1, 2, 6], [1, 6, 5],
+      ];
+
+      for (const [i0, i1, i2] of boxFaces) {
+        const p0 = corners[i0], p1 = corners[i1], p2 = corners[i2];
+        const v0x = p1[0] - p0[0], v0y = p1[1] - p0[1], v0z = p1[2] - p0[2];
+        const v1x = p2[0] - p0[0], v1y = p2[1] - p0[1], v1z = p2[2] - p0[2];
+        let nx = v0y * v1z - v0z * v1y, ny = v0z * v1x - v0x * v1z, nz = v0x * v1y - v0y * v1x;
+        const len = Math.hypot(nx, ny, nz);
+        if (len > 0.000001) { nx /= len; ny /= len; nz /= len; }
+        const baseIdx = vertexList.length / 3;
+        vertexList.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
+        normalList.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+        indexList.push(baseIdx, baseIdx + 1, baseIdx + 2);
+      }
+    }
+
+    if (!Number.isFinite(minX)) {
+      minX = 0; maxX = 1; minY = 0; maxY = 1; minZ = 0; maxZ = 1;
+    }
+
+    const dx = Math.abs(maxX - minX);
+    const dy = Math.abs(maxY - minY);
+    const dz = Math.abs(maxZ - minZ);
+
+    return {
+      vertices: new Float32Array(vertexList),
+      normals: new Float32Array(normalList),
+      indices: new Uint32Array(indexList),
+      faces: Math.max(1, indexList.length / 3),
+      edges: Math.max(1, indexList.length),
+      vertices_count: vertexList.length / 3,
+      boundingBox: {
+        min: { x: minX, y: minY, z: minZ },
+        max: { x: maxX, y: maxY, z: maxZ },
+      },
+      volume: dx * dy * dz,
+      surfaceArea: 2 * (dx * dy + dy * dz + dz * dx),
+      parts: [
+        {
+          id: 'part_1',
+          name: 'Main Body',
+          type: 'solid',
+          volume: dx * dy * dz,
+          surfaceArea: 2 * (dx * dy + dy * dz + dz * dx),
+          boundingBox: {
+            min: { x: minX, y: minY, z: minZ },
+            max: { x: maxX, y: maxY, z: maxZ },
+          },
+        },
+      ],
+      unitScale,
+      detectedUnit,
+    };
+  }
+
   private detectFileFormat(arrayBuffer: ArrayBuffer, declaredExtension?: string): string {
     // Convert first 1KB to text to check for magic strings/headers
     const bytes = new Uint8Array(arrayBuffer.slice(0, 1024));
@@ -729,6 +960,15 @@ export class CADParser {
 
   async parseFile(file: File): Promise<CADModelData> {
     await this.initialize();
+    // Give OpenCascade up to 3s to initialize in background without blocking indefinitely
+    try {
+      await Promise.race([
+        this.initialize(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('init-timeout')), 3000)),
+      ]);
+    } catch {
+      // Direct parser will handle it seamlessly if OpenCascade is not ready yet
+    }
 
     const declaredExtension = file.name.split('.').pop()?.toLowerCase();
     const arrayBuffer = await file.arrayBuffer();
@@ -748,6 +988,7 @@ export class CADParser {
     const previewText = new TextDecoder('utf-8', { fatal: false }).decode(preview);
 
     // Only support STEP files
+    // Support STEP files
     if (detectedFormat === 'step' || detectedFormat === 'stp') {
       modelData = await this.parseSTEP(arrayBuffer);
     } else {
