@@ -92,3 +92,4 @@ npx @convex-dev/static-hosting upload --dist out
 ## Team
 
 Built solo for the Convex All Gas Hackathon.
+
