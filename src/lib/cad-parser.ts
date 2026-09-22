@@ -286,8 +286,15 @@ export class CADParser {
     if (this.oc) {
       try {
         return await this.parseSTEPWithOpenCascade(fileContent);
+        return await Promise.race([
+          this.parseSTEPWithOpenCascade(fileContent),
+          new Promise<CADModelData>((_, reject) =>
+            setTimeout(() => reject(new Error('OpenCascade parse timeout (4s)')), 4000)
+          ),
+        ]);
       } catch (ocError) {
         console.warn('OpenCascade STEP parse failed, falling back to direct STEP parser:', ocError);
+        console.warn('OpenCascade STEP parse failed or timed out, falling back to direct STEP parser:', ocError);
       }
     }
 
@@ -798,7 +805,7 @@ export class CADParser {
     }
 
     // Extract POLY_LOOP entities
-    const loopRegex = /#(\d+)\s*=\s*POLY_LOOP\s*\([^,]*?,\s*\(([^)]+)\)\s*\)/g;
+    const loopRegex = /#(\d+)\s*=\s*POLY_LOOP\s*\([^,]*?,\s*\(([^)]+)\)\s*\)/gi;
     const polygons: Array<Array<[number, number, number]>> = [];
     while ((match = loopRegex.exec(text)) !== null) {
       const refs = match[2].match(/#\d+/g) || [];
@@ -807,6 +814,52 @@ export class CADParser {
         .filter((p): p is [number, number, number] => p !== undefined);
       if (pts.length >= 3) {
         polygons.push(pts);
+      }
+    }
+
+    // Extract B-Rep topology: VERTEX_POINT -> EDGE_CURVE -> ORIENTED_EDGE -> EDGE_LOOP
+    if (polygons.length === 0) {
+      const vertexMap = new Map<string, string>(); // vertexRef -> pointRef
+      const vertexRegex = /#(\d+)\s*=\s*VERTEX_POINT\s*\([^,]*?,\s*(#\d+)\s*\)/gi;
+      while ((match = vertexRegex.exec(text)) !== null) {
+        vertexMap.set('#' + match[1], match[2]);
+      }
+
+      const edgeMap = new Map<string, [string, string]>(); // edgeRef -> [vStart, vEnd]
+      const edgeRegex = /#(\d+)\s*=\s*EDGE_CURVE\s*\([^,]*?,\s*(#\d+)\s*,\s*(#\d+)/gi;
+      while ((match = edgeRegex.exec(text)) !== null) {
+        edgeMap.set('#' + match[1], [match[2], match[3]]);
+      }
+
+      const orientedEdgeMap = new Map<string, { edgeCurve: string; forward: boolean }>();
+      const orientedEdgeRegex = /#(\d+)\s*=\s*ORIENTED_EDGE\s*\([^,]*,[^,]*,[^,]*,\s*(#\d+)\s*,\s*(\.T\.|\.F\.)/gi;
+      while ((match = orientedEdgeRegex.exec(text)) !== null) {
+        orientedEdgeMap.set('#' + match[1], {
+          edgeCurve: match[2],
+          forward: match[3].toUpperCase() === '.T.',
+        });
+      }
+
+      const edgeLoopRegex = /#(\d+)\s*=\s*EDGE_LOOP\s*\([^,]*?,\s*\(([^)]+)\)\s*\)/gi;
+      while ((match = edgeLoopRegex.exec(text)) !== null) {
+        const oeRefs = match[2].match(/#\d+/g) || [];
+        const pts: Array<[number, number, number]> = [];
+        for (const oeRef of oeRefs) {
+          const oe = orientedEdgeMap.get(oeRef);
+          if (!oe) continue;
+          const edge = edgeMap.get(oe.edgeCurve);
+          if (!edge) continue;
+          const vRef = oe.forward ? edge[0] : edge[1];
+          const ptRef = vertexMap.get(vRef);
+          if (!ptRef) continue;
+          const coord = pointMap.get(ptRef);
+          if (coord) {
+            pts.push(coord);
+          }
+        }
+        if (pts.length >= 3) {
+          polygons.push(pts);
+        }
       }
     }
 

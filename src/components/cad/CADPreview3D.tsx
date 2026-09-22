@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
@@ -52,9 +52,20 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
   const meshRef = useRef<THREE.Mesh | null>(null);
   const wireframeRef = useRef<THREE.LineSegments | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const lastParsedFileRef = useRef<File | null>(null);
+
+  // Stable callback refs to prevent re-renders in parent from restarting parse
+  const onParsingStartRef = useRef(onParsingStart);
+  onParsingStartRef.current = onParsingStart;
+  const onParsingCompleteRef = useRef(onParsingComplete);
+  onParsingCompleteRef.current = onParsingComplete;
+  const onPreviewLoadedRef = useRef(onPreviewLoaded);
+  onPreviewLoadedRef.current = onPreviewLoaded;
+  const onModelDataParsedRef = useRef(onModelDataParsed);
+  onModelDataParsedRef.current = onModelDataParsed;
 
   // Parse file function
-  const parseFile = async (file: File) => {
+  const parseFile = useCallback(async (fileToParse: File) => {
     setIsLoading(true);
     setLoadingProgress(15);
     setLoadingStage('Reading file data...');
@@ -71,18 +82,18 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
     }, 300);
 
     try {
-      if (onParsingStart) onParsingStart();
-      if (onPreviewLoaded) onPreviewLoaded(false);
+      if (onParsingStartRef.current) onParsingStartRef.current();
+      if (onPreviewLoadedRef.current) onPreviewLoadedRef.current(false);
       
       const parser = getCADParser();
       setLoadingStage('Extracting 3D geometry...');
-      setLoadingProgress(30);
+      setLoadingProgress(35);
       
-      const data = await parser.parseFile(file);
+      const data = await parser.parseFile(fileToParse);
       clearInterval(progressTimer);
 
-      setLoadingProgress(80);
-      setLoadingStage('Building 3D scene...');
+      setLoadingProgress(85);
+      setLoadingStage('Rendering 3D scene...');
       await new Promise(resolve => setTimeout(resolve, 80));
       
       setModelData(data);
@@ -90,29 +101,30 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
       setLoadingStage('Complete');
       setIsLoading(false);
       
-      if (onParsingComplete) onParsingComplete(true);
-      if (onModelDataParsed) onModelDataParsed(data);
+      if (onParsingCompleteRef.current) onParsingCompleteRef.current(true);
+      if (onModelDataParsedRef.current) onModelDataParsedRef.current(data);
     } catch (err: any) {
       clearInterval(progressTimer);
       console.error('Error parsing CAD file:', err);
       setError(`Failed to parse file: ${err.message}`);
       setIsLoading(false);
       setLoadingProgress(0);
-      if (onParsingComplete) onParsingComplete(false);
-      if (onPreviewLoaded) onPreviewLoaded(false);
+      if (onParsingCompleteRef.current) onParsingCompleteRef.current(false);
+      if (onPreviewLoadedRef.current) onPreviewLoadedRef.current(false);
     }
-  };
+  }, []);
 
-  // Parse file if provided
+  // Parse file if provided (strictly guarded so it only executes when file actually changes)
   useEffect(() => {
-    if (file && !initialModelData) {
+    if (file && file !== lastParsedFileRef.current && !initialModelData) {
+      lastParsedFileRef.current = file;
       parseFile(file);
-    } else if (initialModelData) {
+    } else if (initialModelData && initialModelData !== modelData) {
       setModelData(initialModelData);
       setIsLoading(false);
-      if (onParsingComplete) onParsingComplete(true);
+      if (onParsingCompleteRef.current) onParsingCompleteRef.current(true);
     }
-  }, [file, initialModelData, onParsingComplete, parseFile]);
+  }, [file, initialModelData, modelData, parseFile]);
 
   // Initialize Three.js scene
   useEffect(() => {
@@ -389,140 +401,57 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
   const fileExtension = file?.name.split('.').pop()?.toLowerCase() || 'model';
 
   useEffect(() => {
-    if (!onPreviewLoaded) return;
+    if (!onPreviewLoadedRef.current) return;
     if (isLoading) {
-      onPreviewLoaded(false);
+      onPreviewLoadedRef.current(false);
     } else if (error) {
-      onPreviewLoaded(false);
+      onPreviewLoadedRef.current(false);
     } else if (modelData) {
-      onPreviewLoaded(true);
+      onPreviewLoadedRef.current(true);
     }
-  }, [isLoading, error, modelData, onPreviewLoaded]);
+  }, [isLoading, error, modelData]);
+  // Determine error type and provide specific troubleshooting
+  const getErrorDetails = (errorMsg: string) => {
+    if (errorMsg.toLowerCase().includes('format') || errorMsg.toLowerCase().includes('parse')) {
+      return {
+        title: 'File Format Error',
+        tips: [
+          'Ensure the file is a valid STEP (.step, .stp) format',
+          'Try opening the file in CAD software to verify it\'s not corrupted',
+          'Check if the file was exported correctly from your CAD program'
+        ]
+      };
+    } else if (errorMsg.toLowerCase().includes('size') || errorMsg.toLowerCase().includes('large')) {
+      return {
+        title: 'File Size Error',
+        tips: [
+          'The file may be too large to process in the browser',
+          'Try simplifying the model in your CAD software',
+          'Consider reducing the number of faces or details'
+        ]
+      };
+    } else if (errorMsg.toLowerCase().includes('memory')) {
+      return {
+        title: 'Memory Error',
+        tips: [
+          'Close other browser tabs to free up memory',
+          'Try refreshing the page and uploading again',
+          'Consider using a simpler model'
+        ]
+      };
+    } else {
+      return {
+        title: 'Loading Error',
+        tips: [
+          'Check your internet connection',
+          'Try refreshing the page',
+          'Ensure the file is not corrupted'
+        ]
+      };
+    }
+  };
 
-  if (isLoading) {
-    return (
-      <div className={`w-full h-[350px] md:h-[450px] bg-gray-50 rounded-lg border-2 border-gray-200 flex items-center justify-center relative overflow-hidden ${className}`}>
-        <div className="text-center z-10 max-w-md px-4">
-          <LoadingSpinner />
-          <p className="mt-4 text-sm text-gray-600 font-medium">Loading 3D model...</p>
-          <p className="text-xs text-gray-500 mt-2">{loadingStage}</p>
-          
-          {/* Progress bar */}
-          <div className="mt-4 w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-            <div 
-              className="bg-blue-600 h-full rounded-full transition-all duration-300 ease-out"
-              style={{ width: `${loadingProgress}%` }}
-            />
-          </div>
-          
-          {/* Progress percentage */}
-          <p className="text-xs text-gray-600 mt-2 font-medium">{loadingProgress}%</p>
-          
-          <p className="text-xs text-gray-400 mt-3">Parsing with OpenCascade.js</p>
-        </div>
-        <div className="absolute inset-0 opacity-20">
-          <div className="w-full h-full bg-gradient-to-br from-blue-100 to-indigo-100 animate-pulse"></div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    if (onPreviewLoaded) onPreviewLoaded(false);
-    
-    // Determine error type and provide specific troubleshooting
-    const getErrorDetails = (errorMsg: string) => {
-      if (errorMsg.toLowerCase().includes('format') || errorMsg.toLowerCase().includes('parse')) {
-        return {
-          title: 'File Format Error',
-          tips: [
-            'Ensure the file is a valid STEP (.step, .stp) format',
-            'Try opening the file in CAD software to verify it\'s not corrupted',
-            'Check if the file was exported correctly from your CAD program'
-          ]
-        };
-      } else if (errorMsg.toLowerCase().includes('size') || errorMsg.toLowerCase().includes('large')) {
-        return {
-          title: 'File Size Error',
-          tips: [
-            'The file may be too large to process in the browser',
-            'Try simplifying the model in your CAD software',
-            'Consider reducing the number of faces or details'
-          ]
-        };
-      } else if (errorMsg.toLowerCase().includes('memory')) {
-        return {
-          title: 'Memory Error',
-          tips: [
-            'Close other browser tabs to free up memory',
-            'Try refreshing the page and uploading again',
-            'Consider using a simpler model'
-          ]
-        };
-      } else {
-        return {
-          title: 'Loading Error',
-          tips: [
-            'Check your internet connection',
-            'Try refreshing the page',
-            'Ensure the file is not corrupted'
-          ]
-        };
-      }
-    };
-    
-    const errorDetails = getErrorDetails(error);
-    
-    return (
-      <div className={`w-full h-[350px] md:h-[450px] bg-gray-50 rounded-lg border-2 border-red-200 flex items-center justify-center ${className}`}>
-        <div className="text-center p-6 max-w-md">
-          {/* Error icon */}
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-red-100 rounded-full mb-4">
-            <svg className="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </div>
-          
-          {/* Error title */}
-          <h3 className="text-lg font-semibold text-gray-900 mb-2">{errorDetails.title}</h3>
-          
-          {/* Error message */}
-          <p className="text-sm text-gray-600 mb-4">{error}</p>
-          
-          {/* Troubleshooting tips */}
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4 text-left">
-            <p className="text-xs font-semibold text-yellow-800 mb-2 flex items-center">
-              <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Troubleshooting Tips:
-            </p>
-            <ul className="text-xs text-yellow-700 space-y-1">
-              {errorDetails.tips.map((tip, index) => (
-                <li key={index} className="flex items-start">
-                  <span className="mr-2">•</span>
-                  <span>{tip}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-          
-          {/* Retry button */}
-          {file && (
-            <button
-              onClick={() => parseFile(file)}
-              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Retry
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
+  const errorDetails = error ? getErrorDetails(error) : null;
 
   return (
     <div 
@@ -533,8 +462,86 @@ const CADPreview3D: React.FC<CADPreview3DProps> = ({
           : 'h-[350px] md:h-[450px]'
       } ${className}`}
     >
-      {/* 3D Canvas Mount Point */}
+      {/* 3D Canvas Mount Point - Always mounted */}
       <div ref={canvasContainerRef} className="absolute inset-0 w-full h-full" />
+
+      {/* Loading Overlay */}
+      {isLoading && (
+        <div className="absolute inset-0 z-30 bg-gray-50/95 backdrop-blur-sm flex items-center justify-center">
+          <div className="text-center z-10 max-w-md px-4">
+            <LoadingSpinner />
+            <p className="mt-4 text-sm text-gray-600 font-medium">Loading 3D model...</p>
+            <p className="text-xs text-gray-500 mt-2">{loadingStage}</p>
+            
+            {/* Progress bar */}
+            <div className="mt-4 w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+              <div 
+                className="bg-blue-600 h-full rounded-full transition-all duration-300 ease-out"
+                style={{ width: `${loadingProgress}%` }}
+              />
+            </div>
+            
+            {/* Progress percentage */}
+            <p className="text-xs text-gray-600 mt-2 font-medium">{loadingProgress}%</p>
+            
+            <p className="text-xs text-gray-400 mt-3">High-precision CAD Renderer</p>
+          </div>
+        </div>
+      )}
+
+      {/* Error Overlay */}
+      {error && !isLoading && errorDetails && (
+        <div className="absolute inset-0 z-30 bg-gray-50 flex items-center justify-center p-6">
+          <div className="text-center p-6 max-w-md">
+            {/* Error icon */}
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-red-100 rounded-full mb-4">
+              <svg className="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            
+            {/* Error title */}
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">{errorDetails.title}</h3>
+            
+            {/* Error message */}
+            <p className="text-sm text-gray-600 mb-4">{error}</p>
+            
+            {/* Troubleshooting tips */}
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4 text-left">
+              <p className="text-xs font-semibold text-yellow-800 mb-2 flex items-center">
+                <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Troubleshooting Tips:
+              </p>
+              <ul className="text-xs text-yellow-700 space-y-1">
+                {errorDetails.tips.map((tip, index) => (
+                  <li key={index} className="flex items-start">
+                    <span className="mr-2">•</span>
+                    <span>{tip}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            
+            {/* Retry button */}
+            {file && (
+              <button
+                onClick={() => {
+                  lastParsedFileRef.current = null;
+                  parseFile(file);
+                }}
+                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Retry
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Controls overlay */}
       <div className="absolute top-4 right-4 flex flex-col space-y-2 z-10">

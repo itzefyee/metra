@@ -67,7 +67,6 @@ export default function ImprovedCADGenerator() {
     };
 
     try {
-      await generateMutation.mutateAsync(request);
       setPreviewFile(null);
       const result = await generateMutation.mutateAsync(request);
       setDescription(''); // Clear on success
