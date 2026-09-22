@@ -38,7 +38,23 @@ class RequestValidationError extends Error {}
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
+}
+
+function corsOptions(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
   });
 }
 
@@ -624,10 +640,16 @@ const sendChatMessage = httpAction(async (ctx, request) => {
 // intentionally relative to that mount (for example, /cad/generate becomes
 // /api/cad/generate on the static Convex site).
 http.route({ path: "/cad/generate", method: "POST", handler: generateCAD });
+http.route({ path: "/cad/generate", method: "OPTIONS", handler: httpAction(async () => corsOptions()) });
 http.route({
   pathPrefix: "/cad/status/",
   method: "GET",
   handler: getGenerationStatus,
+});
+http.route({
+  pathPrefix: "/cad/status/",
+  method: "OPTIONS",
+  handler: httpAction(async () => corsOptions()),
 });
 http.route({
   pathPrefix: "/cad/download/",
@@ -635,10 +657,21 @@ http.route({
   handler: downloadGeneration,
 });
 http.route({
+  pathPrefix: "/cad/download/",
+  method: "OPTIONS",
+  handler: httpAction(async () => corsOptions()),
+});
+http.route({
   pathPrefix: "/cad/generation/",
   method: "DELETE",
   handler: deleteGeneration,
 });
+http.route({
+  pathPrefix: "/cad/generation/",
+  method: "OPTIONS",
+  handler: httpAction(async () => corsOptions()),
+});
 http.route({ path: "/mcp/chat", method: "POST", handler: sendChatMessage });
+http.route({ path: "/mcp/chat", method: "OPTIONS", handler: httpAction(async () => corsOptions()) });
 
 export default http;

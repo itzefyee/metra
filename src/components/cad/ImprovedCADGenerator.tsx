@@ -7,15 +7,31 @@
 'use client';
 
 import { useState } from 'react';
+import dynamic from 'next/dynamic';
 import { useCADGeneration, useCADHistory, useDownloadCAD } from '@/hooks/useCADGeneration';
 import { useCADStore } from '@/stores/cad.store';
+import { CADAPI } from '@/lib/cad-api';
 import { CADGenerationRequest } from '@/types/cad.types';
-import { Loader2, Download, History, Sparkles, Settings } from 'lucide-react';
+import { Loader2, Download, History, Sparkles, Settings, Eye } from 'lucide-react';
+
+const CADPreview3D = dynamic(() => import('./CADPreview3D'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-64 bg-gray-50 rounded-xl border border-gray-200">
+      <div className="flex items-center gap-2 text-gray-500">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        <span>Loading 3D preview...</span>
+      </div>
+    </div>
+  ),
+});
 
 export default function ImprovedCADGenerator() {
   const [description, setDescription] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const [showPreferences, setShowPreferences] = useState(false);
+  const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
 
   // Hooks
   const generateMutation = useCADGeneration();
@@ -52,7 +68,23 @@ export default function ImprovedCADGenerator() {
 
     try {
       await generateMutation.mutateAsync(request);
+      setPreviewFile(null);
+      const result = await generateMutation.mutateAsync(request);
       setDescription(''); // Clear on success
+
+      // Fetch STEP file for 3D preview
+      setIsLoadingPreview(true);
+      try {
+        const blob = await CADAPI.downloadFile(result.id, 'step');
+        const file = new File([blob], `generated_${result.id}.step`, {
+          type: 'application/step',
+        });
+        setPreviewFile(file);
+      } catch (previewErr) {
+        console.warn('Could not load 3D preview:', previewErr);
+      } finally {
+        setIsLoadingPreview(false);
+      }
     } catch (error: any) {
       alert(error.message || 'Generation failed');
     }
@@ -212,24 +244,56 @@ export default function ImprovedCADGenerator() {
 
         {/* Success Display */}
         {generateMutation.isSuccess && generateMutation.data && (
-          <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-            <div className="flex items-center justify-between">
-              <div>
-                <strong className="text-green-900">Success!</strong>
-                <p className="text-green-700 text-sm mt-1">
-                  Generated in {defaultFormat.toUpperCase()} format
-                </p>
+          <div className="mt-6 space-y-4">
+            <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div>
+                  <strong className="text-green-900">Success!</strong>
+                  <p className="text-green-700 text-sm mt-1">
+                    Generated in {defaultFormat.toUpperCase()} format
+                  </p>
+                </div>
+                <button
+                  onClick={() => handleDownload(generateMutation.data.id)}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  Download
+                </button>
               </div>
-              <button
-                onClick={() => handleDownload(generateMutation.data.id)}
-                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-              >
-                <Download className="w-4 h-4" />
-                Download
-              </button>
+            </div>
+
+            {/* 3D Preview */}
+            <div className="rounded-xl overflow-hidden border border-gray-200 shadow-sm">
+              <div className="flex items-center gap-2 px-4 py-3 bg-gray-50 border-b border-gray-200">
+                <Eye className="w-4 h-4 text-blue-600" />
+                <span className="font-medium text-gray-800 text-sm">3D Preview</span>
+                {isLoadingPreview && (
+                  <Loader2 className="w-4 h-4 animate-spin text-gray-400 ml-auto" />
+                )}
+              </div>
+              {isLoadingPreview ? (
+                <div className="flex items-center justify-center h-64 bg-gray-50">
+                  <div className="text-center text-gray-500">
+                    <Loader2 className="w-8 h-8 animate-spin mx-auto mb-2" />
+                    <p className="text-sm">Preparing 3D preview…</p>
+                  </div>
+                </div>
+              ) : previewFile ? (
+                <CADPreview3D
+                  file={previewFile}
+                  showStats={true}
+                  className="h-96"
+                />
+              ) : (
+                <div className="flex items-center justify-center h-64 bg-gray-50 text-gray-400 text-sm">
+                  Preview unavailable — download the file to inspect it.
+                </div>
+              )}
             </div>
           </div>
         )}
+
       </div>
 
       {/* History Panel */}
