@@ -1,10 +1,12 @@
 declare module 'opencascade.js' {
-  const initOpenCascade: () => Promise<any>;
-  export default initOpenCascade;
+  export const initOpenCascade: (options?: any) => Promise<any>;
+  export const ocCore: any;
+  export const ocModelingAlgorithms: any;
+  export const ocVisualApplication: any;
+  export const ocDataExchangeBase: any;
+  export const ocDataExchangeExtra: any;
+  export const ocMainJS: any;
+  export const ocMainWasm: any;
+  const defaultExport: any;
+  export default defaultExport;
 }
-
-
-
-
-
-

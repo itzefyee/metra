@@ -193,24 +193,43 @@ export interface CADPart {
 export class CADParser {
   private oc: any = null;
   private initialized: boolean = false;
+  private initPromise: Promise<void> | null = null;
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
     
     // Ensure we're in browser environment
     if (typeof window === 'undefined') {
       throw new Error('CAD parser can only be used in browser environment');
     }
-    
-    try {
-      // Dynamically import OpenCascade.js - only works client-side
-      const initOpenCascade = (await import('opencascade.js')).default;
-      this.oc = await initOpenCascade();
-      this.initialized = true;
-    } catch (error) {
-      console.error('Failed to initialize OpenCascade.js:', error);
-      throw new Error('Failed to initialize CAD parser');
-    }
+    this.initPromise = (async () => {
+      try {
+        // Dynamically import OpenCascade.js - only works client-side
+        const ocModule = await import('opencascade.js');
+        const init = ocModule.initOpenCascade || (ocModule as any).default?.initOpenCascade || (ocModule as any).default;
+        if (typeof init !== 'function') {
+          throw new Error(`OpenCascade init function not found. Module keys: ${Object.keys(ocModule).join(', ')}`);
+        }
+
+        const libs = [
+          ocModule.ocCore,
+          ocModule.ocModelingAlgorithms,
+          ocModule.ocVisualApplication,
+          ocModule.ocDataExchangeBase,
+          ocModule.ocDataExchangeExtra,
+        ].filter(Boolean);
+
+        this.oc = await init(libs.length > 0 ? { libs } : undefined);
+        this.initialized = true;
+      } catch (error) {
+        this.initPromise = null;
+        console.error('Failed to initialize OpenCascade.js:', error);
+        throw new Error('Failed to initialize CAD parser');
+      }
+    })();
+
+    return this.initPromise;
   }
 
   async parseSTEP(fileContent: ArrayBuffer): Promise<CADModelData> {
@@ -825,6 +844,7 @@ export class CADParser {
   dispose(): void {
     this.oc = null;
     this.initialized = false;
+    this.initPromise = null;
   }
 }
 
